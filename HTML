@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Chat + Friends + Video Call</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Arial, sans-serif; background:#f5f5f5; margin:0; padding:20px; display:flex; justify-content:center; }
+    .container { width:100%; max-width:520px; background:#fff; border-radius:12px; box-shadow:0 8px 24px rgba(0,0,0,.12); padding:18px; }
+    h2 { margin:.2rem 0 1rem; text-align:center; }
+    button { cursor:pointer; border:none; border-radius:8px; padding:10px 16px; margin:6px 4px; background:#25d366; color:#fff; font-weight:600; }
+    button.secondary { background:#008069; }
+    button.danger { background:#ff4d4d; }
+    input { width:100%; border:1px solid #ddd; border-radius:8px; padding:10px; margin:6px 0; }
+    #chat-box { height:220px; border:1px solid #eee; border-radius:10px; padding:10px; background:#fafafa; overflow:auto; }
+    #friends-list .friend { border:1px solid #eee; border-radius:10px; padding:10px; margin:6px 0; cursor:pointer; }
+    #friends-list .friend.active { border-color:#25d366; background:#f2fff7; }
+    .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:center; }
+    .muted { color:#666; font-size:.92rem; }
+    /* Call UI */
+    #call-area { display:none; margin-top:12px; border:1px solid #eee; border-radius:12px; overflow:hidden; }
+    #videos { position:relative; background:#000; width:100%; aspect-ratio:3/2; display:flex; align-items:center; justify-content:center; }
+    #remoteVideo { width:100%; height:100%; object-fit:cover; background:#000; }
+    #localVideo { position:absolute; right:10px; bottom:10px; width:28%; border:2px solid #fff; border-radius:10px; background:#000; }
+    #call-controls { padding:10px; background:#111; color:#fff; display:flex; justify-content:center; gap:10px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Chat + Friends + Video Call</h2>
+
+    <!-- Auth -->
+    <div id="auth-section">
+      <h3>Sign Up</h3>
+      <input id="signup-email" type="email" placeholder="Email" autocomplete="username" />
+      <input id="signup-pass" type="password" placeholder="Password" autocomplete="new-password" />
+      <button id="signup-btn">Sign Up</button>
+
+      <h3>Login</h3>
+      <input id="login-email" type="email" placeholder="Email" autocomplete="username" />
+      <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password" />
+      <button id="login-btn">Login</button>
+    </div>
+
+    <!-- App -->
+    <div id="app-section" style="display:none;">
+      <p class="muted" id="welcome"></p>
+      <div class="row">
+        <button id="logout" class="danger">Logout</button>
+      </div>
+
+      <h3>Add Friend</h3>
+      <input id="friend-email" type="email" placeholder="Friend's Email" />
+      <div class="row">
+        <button id="add-friend-btn" class="secondary">Add Friend</button>
+      </div>
+
+      <h3>Your Friends</h3>
+      <div id="friends-list"></div>
+
+      <h3>Chat with <span id="chat-with">None</span></h3>
+      <div id="chat-box"></div>
+      <div class="row">
+        <input id="msg" type="text" placeholder="Type message…" />
+        <button id="send-btn">Send</button>
+        <button id="call-btn" class="secondary">Start Call</button>
+      </div>
+
+      <!-- Call UI -->
+      <div id="call-area">
+        <div id="videos">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <video id="localVideo" autoplay playsinline muted></video>
+        </div>
+        <div id="call-controls">
+          <span id="call-status">Connecting…</span>
+          <button id="end-call" class="danger">End Call</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Firebase (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.11/firebase-database-compat.js"></script>
+
+  <script>
+    // ---------- Your Firebase config ----------
+    const firebaseConfig = {
+      apiKey: "AIzaSyCwYTTMMiucxVlcnHoTSY4K2d2dtyx01I8",
+      authDomain: "calling-ax.firebaseapp.com",
+      databaseURL: "https://calling-ax-default-rtdb.firebaseio.com",
+      projectId: "calling-ax",
+      storageBucket: "calling-ax.firebasestorage.app",
+      messagingSenderId: "931918238551",
+      appId: "1:931918238551:web:4e9f70352189cac6f86412"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const db   = firebase.database();
+
+    // ---------- UI refs ----------
+    const authSection  = document.getElementById("auth-section");
+    const appSection   = document.getElementById("app-section");
+    const welcome      = document.getElementById("welcome");
+    const friendsList  = document.getElementById("friends-list");
+    const chatBox      = document.getElementById("chat-box");
+    const msgInput     = document.getElementById("msg");
+    const chatWith     = document.getElementById("chat-with");
+    const callBtn      = document.getElementById("call-btn");
+    const callArea     = document.getElementById("call-area");
+    const callStatus   = document.getElementById("call-status");
+    const localVideo   = document.getElementById("localVideo");
+    const remoteVideo  = document.getElementById("remoteVideo");
+
+    // ---------- State ----------
+    let currentUser = null;
+    let currentFriendEmail = null;
+    let currentChatId = null;
+
+    // WebRTC state
+    let pc = null, localStream = null, remoteStream = null;
+    let isCaller = false;
+    let callRef = null, iceRefCaller = null, iceRefCallee = null;
+    let iceListenerCaller = null, iceListenerCallee = null;
+    let incomingListener = null;
+
+    // ---------- Helpers ----------
+    const emailKey = e => e.replace(/\./g, "_");
+    const unEmail  = k => k.replace(/_/g, ".");
+    const makeChatId = (a,b) => {
+      const A = emailKey(a), B = emailKey(b);
+      return (A < B) ? `${A}__${B}` : `${B}__${A}`; // stable 2-part key
+    };
+
+    async function ensureUserNode(user){
+      await db.ref(`users/${user.uid}`).update({ uid:user.uid, email:user.email });
+    }
+
+    // ---------- Auth ----------
+    document.getElementById("signup-btn").onclick = () => {
+      const email = document.getElementById("signup-email").value.trim();
+      const pass  = document.getElementById("signup-pass").value.trim();
+      auth.createUserWithEmailAndPassword(email, pass)
+        .then(()=>alert("Signup successful"))
+        .catch(e=>alert(e.message));
+    };
+
+    document.getElementById("login-btn").onclick = () => {
+      const email = document.getElementById("login-email").value.trim();
+      const pass  = document.getElementById("login-pass").value.trim();
+      auth.signInWithEmailAndPassword(email, pass)
+        .catch(e=>alert(e.message));
+    };
+
+    document.getElementById("logout").onclick = async () => {
+      await endCallSafe();
+      auth.signOut();
+    };
+
+    auth.onAuthStateChanged(async user => {
+      if(user){
+        currentUser = user;
+        await ensureUserNode(user);
+        authSection.style.display = "none";
+        appSection.style.display  = "block";
+        welcome.textContent = "Logged in as " + user.email;
+        loadFriends(user);
+        startIncomingCallListener();
+      }else{
+        currentUser = null;
+        authSection.style.display = "block";
+        appSection.style.display  = "none";
+        stopIncomingCallListener();
+      }
+    });
+
+    // ---------- Friends (mutual by email) ----------
+    document.getElementById("add-friend-btn").onclick = async () => {
+      const friendEmail = document.getElementById("friend-email").value.trim();
+      if(!currentUser) return alert("Login first");
+      if(!friendEmail) return;
+
+      // find friend's uid by email
+      const snap = await db.ref("users").orderByChild("email").equalTo(friendEmail).limitToFirst(1).once("value");
+      if(!snap.exists()){ alert("No user with this email"); return; }
+      const friendUid = Object.keys(snap.val())[0];
+
+      // mutual store under users/{uid}/friends
+      await db.ref(`users/${currentUser.uid}/friends/${emailKey(friendEmail)}`).set(true);
+      await db.ref(`users/${friendUid}/friends/${emailKey(currentUser.email)}`).set(true);
+
+      document.getElementById("friend-email").value = "";
+      alert("Friend added both sides ✔");
+    };
+
+    function loadFriends(user){
+      friendsList.innerHTML = "";
+      db.ref(`users/${user.uid}/friends`).on("value", async s=>{
+        friendsList.innerHTML = "";
+        s.forEach(child=>{
+          const fEmail = unEmail(child.key);
+          const div = document.createElement("div");
+          div.className = "friend";
+          div.textContent = fEmail;
+          div.onclick = ()=> openChat(fEmail);
+          friendsList.appendChild(div);
+        });
+      });
+    }
+
+    // ---------- Chat ----------
+    function openChat(friendEmail){
+      currentFriendEmail = friendEmail;
+      chatWith.textContent = friendEmail;
+      chatBox.innerHTML = "";
+      currentChatId = makeChatId(currentUser.email, friendEmail);
+
+      db.ref("chats/"+currentChatId).off();
+      db.ref("chats/"+currentChatId).on("child_added", snap=>{
+        const m = snap.val();
+        const p = document.createElement("p");
+        p.textContent = `${m.user}: ${m.text}`;
+        chatBox.appendChild(p);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      });
+
+      // highlight active
+      Array.from(document.querySelectorAll("#friends-list .friend")).forEach(el=>{
+        el.classList.toggle("active", el.textContent===friendEmail);
+      });
+    }
+
+    document.getElementById("send-btn").onclick = async ()=>{
+      const text = msgInput.value.trim();
+      if(!text) return;
+      if(!currentFriendEmail) return alert("Select a friend first");
+      const chatId = currentChatId || makeChatId(currentUser.email, currentFriendEmail);
+
+      await db.ref("chats/"+chatId).push({
+        user: currentUser.email,
+        text, time: Date.now()
+      });
+      msgInput.value = "";
+    };
+
+    // ---------- Calling (WebRTC + Firebase signaling) ----------
+    const rtcConfig = {
+      iceServers: [
+        { urls: ["stun:stun.l.google.com:19302"] },
+        // TURN (optional, add your server for reliability):
+        // { urls:"turn:YOUR_TURN:3478", username:"user", credential:"pass" }
+      ]
+    };
+
+    callBtn.onclick = async ()=>{
+      if(!currentFriendEmail) return alert("Select a friend first");
+      await startCall(currentFriendEmail);
+    };
+    document.getElementById("end-call").onclick = ()=> endCallSafe();
+
+    async function preparePeer(){
+      // media
+      try{
+        localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+      }catch(e){
+        alert("Please allow camera & mic.");
+        throw e;
+      }
+      localVideo.srcObject = localStream;
+
+      pc = new RTCPeerConnection(rtcConfig);
+      localStream.getTracks().forEach(t=>pc.addTrack(t, localStream));
+
+      remoteStream = new MediaStream();
+      remoteVideo.srcObject = remoteStream;
+
+      pc.ontrack = (ev)=>{
+        ev.streams[0].getTracks().forEach(tr=>remoteStream.addTrack(tr));
+      };
+      pc.onicecandidate = (ev)=>{
+        if(ev.candidate){
+          const target = isCaller ? iceRefCaller : iceRefCallee;
+          target.push(JSON.parse(JSON.stringify(ev.candidate)));
+        }
+      };
+      pc.onconnectionstatechange = ()=>{
+        const st = pc.connectionState;
+        if(st==="connected") callStatus.textContent = "Connected";
+        if(st==="disconnected"||st==="failed"||st==="closed") endCallSafe();
+      };
+    }
+
+    async function startCall(friendEmail){
+      isCaller = true;
+      callArea.style.display = "block";
+      callStatus.textContent = "Calling…";
+
+      const me = currentUser.email;
+      const calleeKey = emailKey(friendEmail);
+      const callerKey = emailKey(me);
+      const pairKey   = makeChatId(me, friendEmail);
+
+      callRef      = db.ref(`calls/${calleeKey}/${callerKey}`);
+      iceRefCaller = db.ref(`ice/${pairKey}/caller`);
+      iceRefCallee = db.ref(`ice/${pairKey}/callee`);
+
+      await preparePeer();
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await callRef.set({ from: me, to: friendEmail, status:"offer", offer: JSON.stringify(offer) });
+
+      // watch for answer / end
+      callRef.on("value", async s=>{
+        const d = s.val(); if(!d) return;
+        if(d.status==="answer" && d.answer && !pc.currentRemoteDescription){
+          await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(d.answer)));
+          callStatus.textContent = "Connecting…";
+        }
+        if(d.status==="ended"){ await endCallSafe(); }
+      });
+
+      // listen callee ICE
+      iceListenerCallee = iceRefCallee.on("child_added", async s=>{
+        try{ await pc.addIceCandidate(new RTCIceCandidate(s.val())); }catch(e){}
+      });
+    }
+
+    function startIncomingCallListener(){
+      const meKey = emailKey(currentUser.email);
+      const myCallsRef = db.ref(`calls/${meKey}`);
+      incomingListener = myCallsRef.on("child_added", async snap=>{
+        const data = snap.val();
+        if(!data || data.status!=="offer") return;
+        const accept = confirm(`Incoming call from ${data.from}. Accept?`);
+        if(!accept){
+          db.ref(`calls/${meKey}/${snap.key}`).update({ status:"ended" });
+          return;
+        }
+        await answerCall(snap.key, data);
+      });
+    }
+    function stopIncomingCallListener(){
+      if(!currentUser) return;
+      const meKey = emailKey(currentUser?.email || "");
+      if(incomingListener) db.ref(`calls/${meKey}`).off("child_added", incomingListener);
+      incomingListener = null;
+    }
+
+    async function answerCall(callerKey, data){
+      isCaller = false;
+      callArea.style.display = "block";
+      callStatus.textContent = "Connecting…";
+
+      const meEmail = currentUser.email;
+      const meKey   = emailKey(meEmail);
+      const pairKey = makeChatId(meEmail, data.from);
+
+      callRef      = db.ref(`calls/${meKey}/${callerKey}`);
+      iceRefCaller = db.ref(`ice/${pairKey}/caller`);
+      iceRefCallee = db.ref(`ice/${pairKey}/callee`);
+
+      await preparePeer();
+
+      const offer = JSON.parse(data.offer);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      await callRef.update({ status:"answer", answer: JSON.stringify(answer) });
+
+      // listen caller ICE
+      iceListenerCaller = iceRefCaller.on("child_added", async s=>{
+        try{ await pc.addIceCandidate(new RTCIceCandidate(s.val())); }catch(e){}
+      });
+
+      // if caller ends
+      callRef.on("value", async s=>{
+        const d = s.val(); if(d && d.status==="ended"){ await endCallSafe(); }
+      });
+    }
+
+    async function endCallSafe(){
+      // Stop PC
+      try{ if(pc) pc.close(); }catch(e){}
+      pc = null;
+
+      // Stop media
+      if(localStream){ localStream.getTracks().forEach(t=>t.stop()); }
+      localStream = null; remoteStream = null;
+      localVideo.srcObject = null; remoteVideo.srcObject = null;
+
+      // Off ICE listeners
+      try{
+        if(iceListenerCaller && iceRefCaller) iceRefCaller.off("child_added", iceListenerCaller);
+        if(iceListenerCallee && iceRefCallee) iceRefCallee.off("child_added", iceListenerCallee);
+      }catch(e){}
+      iceListenerCaller = iceListenerCallee = null;
+
+      // Mark ended on DB
+      try{ if(callRef) await callRef.update({ status:"ended" }); }catch(e){}
+
+      callRef = iceRefCaller = iceRefCallee = null;
+      callArea.style.display = "none";
+      callStatus.textContent = "Connecting…";
+    }
+  </script>
+</body>
+</html>
